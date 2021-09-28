@@ -6,6 +6,7 @@ import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, precision_recall_fscore_support
 
 
 
@@ -55,60 +56,110 @@ def import_data_and_separate_features_from_labels(csv_file_path):
     
     return features, labels, feature_names
 
-def random_forest_with_stratified_kfold_cv(kfolds, features, labels, rand_state=123):
+def random_forest_with_stratified_kfold_cv(kfolds, features, labels, n_trees = 1000, rand_state=123, score_digits=3, positive_class=None):
     """
-    Fits k-fold Random Forest classifiers and returns model QC metrics and feature importances. 
+    Fits k-fold Random Forest classifiers and returns model QC metrics, feature importances, a confusion matrix for display and precision/recall. 
 
     Parameters
     ----------
     kfolds : int, default=5
         number of folds to create. 
-    features:  a Pandas dataframe as created by the import_data_and_separate_features_from_labels of shape (n_samples, n_features)
+    features: a Pandas dataframe as created by the import_data_and_separate_features_from_labels of shape (n_samples, n_features)
         the input features from which the trees will be created.
     labels: list of label class names 
        the class labels of the samples of length n_samples
+    n_trees: int, default=1000
+       The number of trees in the forest.
     rand_state: int, default=123 
-        RandomState instance used to perform both sample bootstrapping and feature choice at each split. 
+        RandomState instance used to perform both sample bootstrapping and feature choice at each split. Set for reproducible results.
+    score_digits: int, default=2
+        Number of decimals to round the mean accuracy test score of the built Random Forest model
     
     Returns
     --------
-    mean_test_score: float
-    mean_feature_importances: a Pandas dataframe
-
-    training and test sets. It uses these sets to optimize the hyperparameters and return the best model's parameters. 
-    A new model is built with the best parameters on the entire training set. After testing, training score, test score, 
-    feature importances are returned. 
-    
+    scores: Pandas dataframe with the model train/test accuracy scores
+        mean and std accuracy on the given train and test data.
+    original_feature_importances: a Pandas dataframe of shape (n_features, 3)
+        A Pandas dataframe that contains feature names and their mean and standard deviation of their feature importance computed from the k-fold cv.
+    confusion_matrix_disp: a ConfusionMatrixDisplay object ready for plotting
+        Call .plot() on the object for display
+    pos_label_scores: a Pandas dataframe with precision, recall, fbeta_score and number of occurrences of each label.
+   
     """
-    model = RandomForestClassifier(random_state=rand_state)
+    model = RandomForestClassifier(n_estimators=n_trees, criterion="gini", random_state=rand_state)
     skf = StratifiedKFold(n_splits=kfolds, shuffle=True, random_state=rand_state) 
     
-    scores_test= [] 
-    
+    scores_train=[]
+    scores_test= []
     feature_importances = []
+    true_labels = []      # a list of the true sample labels (one per k-fold)
+    predicted_labels = [] # a list of the predicted sample labels (one per k-fold)
     
     for train_index, test_index in skf.split(features, labels):
-        
-        # X are the features and y are the labels (trichome densities)
+
+        # X are the features and y are the labels (sample classes)
         X_train, X_test = features.iloc[train_index,:], features.iloc[test_index,:]
         y_train, y_test = labels[train_index], labels[test_index]
        
-        #training the model with fit
+        # Training the model with fit
         model.fit(X_train, y_train)
         
-        #saving the gini importance (feature importance)
+        # Saving the gini importance (feature importance)
         feature_importances.append(model.feature_importances_)
         
-        #saving the test score of each cv (within each n_estimator value) to a list of scores 
-        ## specific to regression 
-        model_score = model.score(X_test, y_test)
-        scores_test.append(model_score)
+        # Saving the test score of each cv (within each n_estimator value) to a list of scores
+        # Useful to detect overfitting on training dataset 
+        model_train_score = model.score(X_train, y_train)
+        scores_train.append(model_train_score)
+        model_test_score = model.score(X_test, y_test)
+        scores_test.append(model_test_score)
         
-    #take the mean per n_estimator value 
-    mean_test_score = np.average(scores_test)
-    sd_test_score = np.std(scores_test)
+        ## Computing the confusion matrix
+        predicted_labels.append(model.predict(X_test))
+        true_labels.append(y_test)
+
+    ### Average/SD of model train/test scores
+    mean_train_score = np.around(np.average(scores_train), decimals=score_digits)
+    sd_train_score = np.around(np.std(scores_train), decimals=score_digits) 
+    mean_test_score = np.around(np.average(scores_test), decimals=score_digits)
+    sd_test_score = np.around(np.std(scores_test), decimals=score_digits)
+    scores = pd.DataFrame({
+        "train": [mean_train_score, sd_train_score], 
+        "test": [mean_test_score, sd_test_score]}, 
+        index=["mean","sd"])
+    
+    ### Pandas dataframe of feature average and SD importances
     mean_feature_importances = np.average(feature_importances, axis=0) 
+    sd_feature_importances = np.std(feature_importances, axis=0)     
+    original_feature_importances = pd.DataFrame(
+        data={
+        "feature": features.columns,
+        "mean_feature_importance":mean_feature_importances, 
+        "sd_feature_importance":sd_feature_importances})
+
+    ### Confusion matrix
+    # Pandas dataframe of sample true and predicted labels. 
+    true_labels_as_list = [item for sublist in true_labels for item in sublist]           # flatten list
+    predicted_labels_as_list = [item for sublist in predicted_labels for item in sublist] # flatten list 
+    truth_prediction_df = pd.DataFrame({"truth":true_labels_as_list, "prediction":predicted_labels_as_list})
+    # Computes the confusion matrix and returns a ConfusionMatrixDisplay ready to be plotted
+    cm = confusion_matrix(
+        y_true=truth_prediction_df.loc[:,"truth"] , 
+        y_pred=truth_prediction_df.loc[:,"prediction"])
+    confusion_matrix_disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=model.classes_)
+
+    ### Precision, recall, F-measure and support for each class.
+    if positive_class == None:
+        pos_label_scores = precision_recall_fscore_support(y_true = truth_prediction_df.loc[:,"truth"], y_pred=truth_prediction_df.loc[:,"prediction"])
+    elif positive_class not in model.classes_:
+        print("The 'positive_class' argument should be equal to one of the two sample classes. Check its value.")
+    else:
+        pos_label_scores = precision_recall_fscore_support(y_true = truth_prediction_df.loc[:,"truth"], y_pred=truth_prediction_df.loc[:,"prediction"])
+    pos_label_scores = pd.DataFrame(pos_label_scores)
+
+    print("This is the average training score: {:.3}".format(mean_train_score))    
+    print("This is the average test score: {:.3}".format(mean_test_score))    
     
-    ## get the averages and std of the means scores and the feature importances 
-    
-    return mean_test_score, sd_test_score, mean_feature_importances
+    return scores, original_feature_importances, confusion_matrix_disp, pos_label_scores
+
+
