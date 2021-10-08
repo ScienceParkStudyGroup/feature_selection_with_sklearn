@@ -1,4 +1,4 @@
-name: rf
+name: sklearn
 channels:
   - conda-forge
   - anaconda-fusion
